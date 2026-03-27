@@ -1,0 +1,109 @@
+#define BLYNK_TEMPLATE_ID "TMPL3LqxRfsTv"
+#define BLYNK_TEMPLATE_NAME "SMART ENERGY MONITORING SYSTEM"
+#define BLYNK_AUTH_TOKEN "KAmUeB3Cn0dr3Qv1gtkln_noZ592qZtO"
+
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <PZEM004Tv30.h>
+#include <SoftwareSerial.h>
+
+// WiFi Configuration
+const char* ssid = "OnePlus 10r";
+const char* password = "Bhoolgaya";
+
+// Hardware Configuration - SoftwareSerial for PZEM (RX=13/D7, TX=15/D8)
+SoftwareSerial pzemSerial(13, 15);  // RX=GPIO13(D7), TX=GPIO15(D8)
+PZEM004Tv30 pzem(pzemSerial);
+
+// Measurement Variables
+float voltage = 0.0f;
+float current = 0.0f;
+float power = 0.0f;
+float energyTotal = 0.0f;
+bool isOnline = false;
+
+// Timing Constants
+const unsigned long UPDATE_INTERVAL = 2000UL;
+unsigned long lastUpdateTime = 0UL;
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  
+  // Initialize PZEM SoftwareSerial
+  pzemSerial.begin(9600);
+  
+  // Configure PZEM
+  pzem.setAddress(0x42);
+  
+  // Connect to WiFi & Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
+  
+  Serial.println();
+  Serial.println(F("====================================="));
+  Serial.println(F("🚀 SMART ENERGY MONITOR v2.0"));
+  Serial.println(F("PZEM Pins: RX=D7(13), TX=D8(15)"));
+  Serial.println(F("====================================="));
+  Serial.println(F("V    | I      | P    | Energy | Status"));
+  Serial.println(F("------------------------------------"));
+}
+
+void loop() {
+  Blynk.run();
+  
+  unsigned long currentTime = millis();
+  if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
+    readSensors();
+    updateBlynkDisplay();
+    printStatus();
+    lastUpdateTime = currentTime;
+  }
+  
+  delay(50);  // Reduced CPU usage
+}
+
+void readSensors() {
+  voltage = pzem.voltage();
+  if (isnan(voltage)) voltage = 0.0f;
+  
+  current = pzem.current();
+  if (isnan(current)) current = 0.0f;
+  
+  power = pzem.power();
+  if (isnan(power)) power = 0.0f;
+  
+  energyTotal = pzem.energy();
+  if (isnan(energyTotal)) energyTotal = 0.0f;
+  
+  // Validate Readings
+  isOnline = (voltage > 50.0f && voltage < 260.0f && current > 0.001f);
+}
+
+void updateBlynkDisplay() {
+  Blynk.virtualWrite(V0, voltage);
+  Blynk.virtualWrite(V1, current * 1000);  // mA for better display
+  Blynk.virtualWrite(V2, power);
+  Blynk.virtualWrite(V3, energyTotal);
+  Blynk.virtualWrite(V4, isOnline ? 1 : 0);  // LED Widget
+  Blynk.virtualWrite(V5, isOnline ? "✅ ONLINE" : "❌ OFFLINE");
+}
+
+void printStatus() {
+  Serial.printf("V:%.1fV | I:%.3fA | P:%.1fW | E:%.2fkWh | %s\n",
+                voltage, current, power, energyTotal/1000.0f,
+                isOnline ? "ONLINE" : "OFFLINE");
+}
+
+// Blynk Callbacks
+BLYNK_CONNECTED() {
+  Serial.println(F("🌐 Blynk 2.0 Connected!"));
+  Blynk.syncVirtual(V0, V1, V2, V3);
+}
+
+BLYNK_WRITE(V6) {
+  if (param.asInt() == 1) {
+    pzem.resetEnergy();
+    Serial.println(F("🔄 Energy Reset via Blynk App!"));
+    Blynk.virtualWrite(V3, 0.0);
+  }
+}
