@@ -2,108 +2,192 @@
 #define BLYNK_TEMPLATE_NAME "SMART ENERGY MONITORING SYSTEM"
 #define BLYNK_AUTH_TOKEN "KAmUeB3Cn0dr3Qv1gtkln_noZ592qZtO"
 
-#include <ESP8266WiFi.h>
-#include <BlynkSimpleEsp8266.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <PZEM004Tv30.h>
 #include <SoftwareSerial.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 
-// WiFi Configuration
-const char* ssid = "OnePlus 10r";
+// --------------------------------------
+// Pins & Hardware Configuration
+// --------------------------------------
+#define RELAY_PIN 13          // D7 on NodeMCU - Controls the Load
+SoftwareSerial pzemSWSerial(14, 12); // D5 (RX), D6 (TX)
+PZEM004Tv30 pzem(pzemSWSerial);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --------------------------------------
+// Credentials & Config
+// --------------------------------------
+const char* ssid = "OnePlus 10R ";
 const char* password = "Bhoolgaya";
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
 
-// Hardware Configuration - SoftwareSerial for PZEM (RX=13/D7, TX=15/D8)
-SoftwareSerial pzemSerial(13, 15);  // RX=GPIO13(D7), TX=GPIO15(D8)
-PZEM004Tv30 pzem(pzemSerial);
+// SMS API (Circuit Digest / Twilio / etc.)
+const char* apiKey = "yourapikey";    
+const char* mobileNumber = "Yourphonenumber";
+const char* templateID = "101";
 
-// Measurement Variables
-float voltage = 0.0f;
-float current = 0.0f;
-float power = 0.0f;
-float energyTotal = 0.0f;
-bool isOnline = false;
+unsigned long lastSMS = 0;
+const unsigned long smsCooldown = 60000; // 1 minute
+unsigned long lastUpdate = 0;
+const long interval = 5000; // Publish every 5 seconds
 
-// Timing Constants
-const unsigned long UPDATE_INTERVAL = 2000UL;
-unsigned long lastUpdateTime = 0UL;
+WiFiClient espClient;
+PubSubClient client(espClient);
 
+// MQTT Topics
+const char* tJSON = "unique/energy/data";
+const char* tControl = "unique/energy/control"; // Topic to turn relay ON/OFF
+
+// --------------------------------------
+// SMS Alert Function
+// --------------------------------------
+void sendSMS(String reason) {
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); 
+  HTTPClient http;
+  
+  String apiUrl = "https://www.circuitdigest.cloud/api/v1/send_sms?ID=" + String(templateID);
+  
+  if (http.begin(secureClient, apiUrl)) {
+    http.addHeader("Authorization", apiKey);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"mobiles\":\"" + String(mobileNumber) + 
+                     "\",\"var1\":\"Energy Meter\",\"var2\":\"" + reason + "\"}";
+    
+    int code = http.POST(payload);
+    Serial.printf("[SMS] Sent. Response: %d\n", code);
+    http.end();
+  }
+}
+
+// --------------------------------------
+// MQTT Callback (For Control)
+// --------------------------------------
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message;
+  for (int i = 0; i < length; i++) message += (char)payload[i];
+  
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  Serial.println(message);
+
+  if (String(topic) == tControl) {
+    if (message == "ON") {
+      digitalWrite(RELAY_PIN, LOW); // Usually Low-level trigger
+      Serial.println("Relay ON");
+    } else if (message == "OFF") {
+      digitalWrite(RELAY_PIN, HIGH);
+      Serial.println("Relay OFF");
+    }
+  }
+}
+
+// --------------------------------------
+// WiFi & MQTT Setup
+// --------------------------------------
+void setup_wifi() {
+  delay(10);
+  Serial.print("\nConnecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    String clientId = "ESP8266Client-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      client.subscribe(tControl);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      delay(5000);
+    }
+  }
+}
+
+// --------------------------------------
+// Setup
+// --------------------------------------
 void setup() {
   Serial.begin(115200);
-  delay(100);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Default OFF
   
-  // Initialize PZEM SoftwareSerial
-  pzemSerial.begin(9600);
-  
-  // Configure PZEM
-  pzem.setAddress(0x42);
-  
-  // Connect to WiFi & Blynk
-  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
-  
-  Serial.println();
-  Serial.println(F("====================================="));
-  Serial.println(F("🚀 SMART ENERGY MONITOR v2.0"));
-  Serial.println(F("PZEM Pins: RX=D7(13), TX=D8(15)"));
-  Serial.println(F("====================================="));
-  Serial.println(F("V    | I      | P    | Energy | Status"));
-  Serial.println(F("------------------------------------"));
+  Wire.begin(4, 5); // SDA=D2, SCL=D1
+  lcd.init();
+  lcd.backlight();
+  lcd.print("IoT Energy Mon");
+
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
 }
 
+// --------------------------------------
+// Loop
+// --------------------------------------
 void loop() {
-  Blynk.run();
-  
-  unsigned long currentTime = millis();
-  if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
-    readSensors();
-    updateBlynkDisplay();
-    printStatus();
-    lastUpdateTime = currentTime;
-  }
-  
-  delay(50);  // Reduced CPU usage
-}
+  if (!client.connected()) reconnect();
+  client.loop();
 
-void readSensors() {
-  voltage = pzem.voltage();
-  if (isnan(voltage)) voltage = 0.0f;
-  
-  current = pzem.current();
-  if (isnan(current)) current = 0.0f;
-  
-  power = pzem.power();
-  if (isnan(power)) power = 0.0f;
-  
-  energyTotal = pzem.energy();
-  if (isnan(energyTotal)) energyTotal = 0.0f;
-  
-  // Validate Readings
-  isOnline = (voltage > 50.0f && voltage < 260.0f && current > 0.001f);
-}
+  unsigned long now = millis();
+  if (now - lastUpdate > interval) {
+    lastUpdate = now;
 
-void updateBlynkDisplay() {
-  Blynk.virtualWrite(V0, voltage);
-  Blynk.virtualWrite(V1, current * 1000);  // mA for better display
-  Blynk.virtualWrite(V2, power);
-  Blynk.virtualWrite(V3, energyTotal);
-  Blynk.virtualWrite(V4, isOnline ? 1 : 0);  // LED Widget
-  Blynk.virtualWrite(V5, isOnline ? "✅ ONLINE" : "❌ OFFLINE");
-}
+    float V = pzem.voltage();
+    float I = pzem.current();
+    float P = pzem.power();
+    float E = pzem.energy();
+    float F = pzem.frequency();
+    float PF = pzem.pf();
 
-void printStatus() {
-  Serial.printf("V:%.1fV | I:%.3fA | P:%.1fW | E:%.2fkWh | %s\n",
-                voltage, current, power, energyTotal/1000.0f,
-                isOnline ? "ONLINE" : "OFFLINE");
-}
+    if (isnan(V)) {
+      Serial.println("Error reading sensor");
+    } else {
+      // Logic: Auto-cut power if Voltage is dangerously high
+      if (V > 255.0) {
+        digitalWrite(RELAY_PIN, HIGH); // Cut Power
+        if (now - lastSMS > smsCooldown) {
+          sendSMS("Overvoltage Cutoff");
+          lastSMS = now;
+        }
+      }
 
-// Blynk Callbacks
-BLYNK_CONNECTED() {
-  Serial.println(F("🌐 Blynk 2.0 Connected!"));
-  Blynk.syncVirtual(V0, V1, V2, V3);
-}
+      // JSON Payload
+      String json = "{";
+      json += "\"V\":" + String(V, 1) + ",";
+      json += "\"I\":" + String(I, 3) + ",";
+      json += "\"P\":" + String(P, 1) + ",";
+      json += "\"E\":" + String(E, 3);
+      json += "}";
+      client.publish(tJSON, json.c_str());
 
-BLYNK_WRITE(V6) {
-  if (param.asInt() == 1) {
-    pzem.resetEnergy();
-    Serial.println(F("🔄 Energy Reset via Blynk App!"));
-    Blynk.virtualWrite(V3, 0.0);
+      // LCD Display
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("V:"); lcd.print(V,1);
+      lcd.setCursor(8,0);
+      lcd.print("I:"); lcd.print(I,2);
+      lcd.setCursor(0,1);
+      lcd.print("P:"); lcd.print(P,1); lcd.print("W");
+    }
   }
 }
+
+
+   
