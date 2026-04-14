@@ -1,5 +1,5 @@
-# Minor_Project_3
-Smart energy monitering and management system
+# Smart Energy Monitering and Management System
+
 📌 Project Overview
 This project is an IoT-based Energy Monitoring System designed to monitor real-time electrical parameters such as voltage, current, power, and energy consumption of household appliances. The system sends live data to a mobile dashboard using the Blynk IoT platform.
 The objective of this project is to enable smart energy monitoring and promote efficient electricity usage.
